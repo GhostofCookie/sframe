@@ -1,0 +1,1481 @@
+
+
+
+
+Network Working Group                                           E. Omara
+Internet-Draft                                                     Apple
+Intended status: Standards Track                               J. Uberti
+Expires: 14 September 2023                                        Google
+                                                              S. Murillo
+                                                          CoSMo Software
+                                                       R. L. Barnes, Ed.
+                                                                   Cisco
+                                                               Y. Fablet
+                                                                   Apple
+                                                           13 March 2023
+
+
+                         Secure Frame (SFrame)
+                      draft-ietf-sframe-enc-latest
+
+Abstract
+
+   This document describes the Secure Frame (SFrame) end-to-end
+   encryption and authentication mechanism for media frames in a
+   multiparty conference call, in which central media servers (selective
+   forwarding units or SFUs) can access the media metadata needed to
+   make forwarding decisions without having access to the actual media.
+
+   The proposed mechanism differs from the Secure Real-Time Protocol
+   (SRTP) in that it is independent of RTP (thus compatible with non-RTP
+   media transport) and can be applied to whole media frames in order to
+   be more bandwidth efficient.
+
+About This Document
+
+   This note is to be removed before publishing as an RFC.
+
+   The latest revision of this draft can be found at https://sframe-
+   wg.github.io/sframe/draft-ietf-sframe-enc.html.  Status information
+   for this document may be found at https://datatracker.ietf.org/doc/
+   draft-ietf-sframe-enc/.
+
+   Discussion of this document takes place on the Secure Media Frames
+   Working Group mailing list (mailto:sframe@ietf.org), which is
+   archived at https://mailarchive.ietf.org/arch/browse/sframe/.
+   Subscribe at https://www.ietf.org/mailman/listinfo/sframe/.
+
+   Source for this draft and an issue tracker can be found at
+   https://github.com/sframe-wg/sframe.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 14 September 2023.
+
+Copyright Notice
+
+   Copyright (c) 2023 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction
+   2.  Terminology
+   3.  Goals
+   4.  SFrame
+     4.1.  Application Context
+     4.2.  SFrame Ciphertext
+     4.3.  SFrame Header
+     4.4.  Encryption Schema
+       4.4.1.  Key Selection
+       4.4.2.  Key Derivation
+       4.4.3.  Encryption
+       4.4.4.  Decryption
+       4.4.5.  Duplicate Frames
+     4.5.  Ciphersuites
+       4.5.1.  AES-CTR with SHA2
+   5.  Key Management
+     5.1.  Sender Keys
+     5.2.  MLS
+   6.  Media Considerations
+     6.1.  SFU
+       6.1.1.  LastN and RTP stream reuse
+       6.1.2.  Simulcast
+       6.1.3.  SVC
+     6.2.  Video Key Frames
+     6.3.  Partial Decoding
+   7.  Security Considerations
+     7.1.  No Per-Sender Authentication
+     7.2.  Key Management
+     7.3.  Authentication tag length
+   8.  IANA Considerations
+   9.  References
+     9.1.  Normative References
+     9.2.  Informative References
+   Appendix A.  Acknowledgements
+   Appendix B.  Overhead
+     B.1.  Audio
+     B.2.  Video
+     B.3.  SFrame vs PERC-lite
+       B.3.1.  Audio
+       B.3.2.  Video
+   Appendix C.  Test Vectors
+     C.1.  AES_CTR_128_HMAC_SHA256_4
+     C.2.  AES_CTR_128_HMAC_SHA256_8
+     C.3.  AES_GCM_128_SHA256
+     C.4.  AES_GCM_256_SHA512
+   Authors' Addresses
+
+1.  Introduction
+
+   Modern multi-party video call systems use Selective Forwarding Unit
+   (SFU) servers to efficiently route RTP streams to call endpoints
+   based on factors such as available bandwidth, desired video size,
+   codec support, and other factors.  An SFU typically does not need
+   access to the media content of the conference, allowing for the media
+   to be "end-to-end" encrypted so that it cannot be decrypted by the
+   SFU.  In order for the SFU to work properly, though, it usually needs
+   to be able to access RTP metadata and RTCP feedback messages, which
+   is not possible if all RTP/RTCP traffic is end-to-end encrypted.
+
+   As such, two layers of encryptions and authentication are required:
+
+   1.  Hop-by-hop (HBH) encryption of media, metadata, and feedback
+       messages between the the endpoints and SFU
+
+   2.  End-to-end (E2E) encryption of media between the endpoints
+
+   The Secure Real-Time Protocol (SRTP) is already widely used for HBH
+   encryption [RFC3711].  The SRTP "double encryption" scheme defines a
+   way to do E2E encryption in SRTP [RFC8723].  Unfortunately, this
+   scheme has poor efficiency and high complexity, and its entanglement
+   with RTP makes it unworkable in several realistic SFU scenarios.
+
+   This document proposes a new end-to-end encryption mechanism known as
+   SFrame, specifically designed to work in group conference calls with
+   SFUs.  SFrame is a general encryption framing that can be used to
+   protect payloads sent over SRTP
+
+    +---+-+-+-------+-+-------------+-------------------------------+<-+
+    |V=2|P|X|  CC   |M|     PT      |       sequence number         |  |
+    +---+-+-+-------+-+-------------+-------------------------------+  |
+    |                           timestamp                           |  |
+    +---------------------------------------------------------------+  |
+    |           synchronization source (SSRC) identifier            |  |
+    +===============================================================+  |
+    |            contributing source (CSRC) identifiers             |  |
+    |                               ....                            |  |
+    +---------------------------------------------------------------+  |
+    |                   RTP extension(s) (OPTIONAL)                 |  |
+ +->+--------------------+------------------------------------------+  |
+ |  |   SFrame header    |                                          |  |
+ |  +--------------------+                                          |  |
+ |  |                                                               |  |
+ |  |          SFrame encrypted and authenticated payload           |  |
+ |  |                                                               |  |
+ +->+---------------------------------------------------------------+<-+
+ |  |                    SRTP authentication tag                    |  |
+ |  +---------------------------------------------------------------+  |
+ |                                                                     |
+ +--- SRTP Encrypted Portion             SRTP Authenticated Portion ---+
+
+          Figure 1: SRTP packet with SFrame-protected payload
+
+2.  Terminology
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in BCP
+   14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+   SFU:  Selective Forwarding Unit (AKA RTP Switch)
+
+   IV:  Initialization Vector
+
+   MAC:  Message Authentication Code
+
+   E2EE:  End to End Encryption
+
+   HBH:  Hop By Hop
+
+3.  Goals
+
+   SFrame is designed to be a suitable E2EE protection scheme for
+   conference call media in a broad range of scenarios, as outlined by
+   the following goals:
+
+   1.  Provide an secure E2EE mechanism for audio and video in
+       conference calls that can be used with arbitrary SFU servers.
+
+   2.  Decouple media encryption from key management to allow SFrame to
+       be used with an arbitrary key management system.
+
+   3.  Minimize packet expansion to allow successful conferencing in as
+       many network conditions as possible.
+
+   4.  Independence from the underlying transport, including use in non-
+       RTP transports, e.g., WebTransport.
+
+   5.  When used with RTP and its associated error resilience
+       mechanisms, i.e., RTX and FEC, require no special handling for
+       RTX and FEC packets.
+
+   6.  Minimize the changes needed in SFU servers.
+
+   7.  Minimize the changes needed in endpoints.
+
+   8.  Work with the most popular audio and video codecs used in
+       conferencing scenarios.
+
+4.  SFrame
+
+   This document defines an encryption mechanism that provides effective
+   end-to-end encryption, is simple to implement, has no dependencies on
+   RTP, and minimizes encryption bandwidth overhead.  Because SFrame can
+   encrypt a full frame, rather than individual packets, bandwidth
+   overhead can reduced by adding encryption overhead only once per
+   media frame, instead of once per packet.
+
+4.1.  Application Context
+
+   SFrame is a general encryption framing, which is typically applied in
+   one of two ways: Either to encrypt whole media frames (per-frame) or
+   individual media payloads (per-packet).  The scale at which SFrame
+   encryption is applied to media determines the overall amount of
+   overhead that SFrame adds to the media stream, as well as the
+   engineering complexity involved in integrating SFrame into a
+   particular environment.
+
+   For example, Figure 2 shows a typical media stack that takes media in
+   from some source, encodes it into frames, divides those frames into
+   media payloads, and then sends those payloads in SRTP packets.
+   Arrows indicate the points where SFrame protection would be
+   integrated into this media stack, when applied per-frame or per-
+   packet.
+
+   Applying SFrame per-frame in this system offers higher efficiency,
+   but may require a more complex integration in environments where
+   depacketization relies on the content of media packets.  Applying
+   SFrame per-packet avoids this complexity, at the cost of higher
+   bandwidth consumption.  Some quantitative discussion of these trade-
+   offs is provided in Appendix B.
+
+   As noted above, however, SFrame is a general media encapsulation, and
+   can be applied in other scenarios.  The precise efficiency and
+   complexity trade-offs will depend on the environment in which SFrame
+   is being integrated.
+
+      +--------------------------------------------------------+
+      |                                                        |
+      |  +----------+      +-------------+      +-----------+  |
+ .-.  |  |          |      |             |      |   SRTP    |  |
+|   | |  |  Encode  |----->|  Packetize  |----->|  Encrypt  |-----------+
+ '+'  |  |          |  ^   |             |  ^   |           |  |        |
+ /|\  |  +----------+  |   +-----+-------+  |   +-----------+  |        |
+/ + \ |                |         ^          |         ^        |        |
+ / \  |              SFrame      |       SFrame       |        |        |
+/   \ |              Protect     |       Protect      |        |        |
+Alice |            (per-frame)   |     (per-packet)   |        |        |
+      +--------------------------|--------------------|--------+        |
+                                 |                    |                 v
+                                 |                    |           +-----+------+
+                       E2E Key   |          HBH Key   |           |   Media    |
+                      Management |         Management |           |   Server   |
+                                 |                    |           +-----+------+
+                                 |                    |                 |
+      +--------------------------|--------------------|--------+        |
+ .-.  |              SFrame      |        SFrame      |        |        |
+|   | |             Unprotect    |       Unprotect    |        |        |
+ '+'  |            (per-frame)   |      (per-packet)  |        |        |
+ /|\  |                 |        V           |        V        |        |
+/ + \ |  +----------+   |  +-----+-------+   |  +-----------+  |        |
+ / \  |  |          |   V  |             |   V  |   SRTP    |  |        |
+/   \ |  |  Decode  |<-----| Depacketize |<-----|  Decrypt  |<----------+
+ Bob  |  |          |      |             |      |           |  |
+      |  +----------+      +-------------+      +-----------+  |
+      |                                                        |
+      +--------------------------------------------------------+
+
+                               Figure 2
+
+   Like SRTP, SFrame does not define how the keys used for SFrame are
+   exchanged by the parties in the conference.  Keys for SFrame might be
+   distributed over an existing E2E-secure channel (see Section 5.1), or
+   derived from an E2E-secure shared secret (see Section 5.2).  The key
+   management system MUST ensure that each key used for encrypting media
+   is used by exactly one media sender, in order to avoid reuse of IVs.
+
+4.2.  SFrame Ciphertext
+
+   An SFrame ciphertext comprises an SFrame header followed by the
+   output of an AEAD encryption of the plaintext [RFC5116], with the
+   header provided as additional authenticated data (AAD).
+
+   The SFrame header is a variable-length structure described in detail
+   in Section 4.3.  The structure of the encrypted data and
+   authentication tag are determined by the AEAD algorithm in use.
+
+     +-+---+-+----+------------------------------------------+^+
+     |S|LEN|X|KID |         Frame Counter                    | |
+   +^+-+---+-+----+------------------------------------------+ |
+   | |                                                       | |
+   | |                                                       | |
+   | |                                                       | |
+   | |                                                       | |
+   | |                   Encrypted Data                      | |
+   | |                                                       | |
+   | |                                                       | |
+   | |                                                       | |
+   | |                                                       | |
+   +>+-------------------------------------------------------+<+
+   | |                 Authentication Tag                    | |
+   | +-------------------------------------------------------+ |
+   |                                                           |
+   |                                                           |
+   +---- Encrypted Portion            Authenticated Portion ---+
+
+   When SFrame is applied per-packet, the payload of each packet will be
+   an SFrame ciphertext.  When SFrame is applied per-frame, the SFrame
+   ciphertext representing an encrypted frame will span several packets,
+   with the header appearing in the first packet and the authentication
+   tag in the last packet.
+
+4.3.  SFrame Header
+
+   The SFrame header specifies two values from which encryption
+   parameters are derived:
+
+   *  A Key ID (KID) that determines which encryption key should be used
+
+   *  A counter (CTR) that is used to construct the IV for the
+      encryption
+
+   Applications MUST ensure that each (KID, CTR) combination is used for
+   exactly one encryption operation.  Typically this is done by
+   assigning each sender a KID or set of KIDs, then having each sender
+   use the CTR field as a monotonic counter, incrementing for each
+   plaintext that is encrypted.  Note that in addition to its
+   simplicity, this scheme minimizes overhead by keeping CTR values as
+   small as possible.
+
+   Both the counter and the key id are encoded as integers in network
+   (big-endian) byte order, in a variable length format to decrease the
+   overhead.  The length of each field is up to 8 bytes and is
+   represented in 3 bits in the SFrame header: 000 represents a length
+   of 1, 001 a length of 2, etc.
+
+   The first byte in the SFrame header has a fixed format and contains
+   the header metadata:
+
+    0 1 2 3 4 5 6 7
+   +-+-+-+-+-+-+-+-+
+   |R| LEN |X|  K  |
+   +-+-+-+-+-+-+-+-+
+
+                      Figure 3: SFrame header metadata
+
+   Reserved (R, 1 bit):  This field MUST be set to zero on sending, and
+      MUST be ignored by receivers.
+
+   Counter Length (LEN, 3 bits):  This field indicates the length of the
+      CTR field in bytes, minus one (the range of possible values is
+      thus 1-8).
+
+   Extended Key Id Flag (X, 1 bit):  Indicates if the key field contains
+      the key id or the key length.
+
+   Key or Key Length (K, 3 bits):  This field contains the key id (KID)
+      if the X flag is set to 0, or the key length (KLEN) if set to 1.
+
+   If X flag is 0, then the KID is in the range of 0-7 and the counter
+   (CTR) is found in the next LEN bytes:
+
+    0 1 2 3 4 5 6 7
+   +-+-----+-+-----+---------------------------------+
+   |R|LEN  |0| KID |    CTR... (length=LEN)          |
+   +-+-----+-+-----+---------------------------------+
+
+                   Figure 4: SFrame header with short KID
+
+   If X flag is 1 then KLEN is the length of the key (KID) in bytes,
+   minus one (the range of possible lengths is thus 1-8).  The KID is
+   encoded in the KLEN bytes following the metadata byte, and the
+   counter (CTR) is encoded in the next LEN bytes:
+
+ 0 1 2 3 4 5 6 7
++-+-----+-+-----+---------------------------+---------------------------+
+|R|LEN  |1|KLEN |   KID... (length=KLEN)    |    CTR... (length=LEN)    |
++-+-----+-+-----+---------------------------+---------------------------+
+
+4.4.  Encryption Schema
+
+   SFrame encryption uses an AEAD encryption algorithm and hash function
+   defined by the ciphersuite in use (see Section 4.5).  We will refer
+   to the following aspects of the AEAD algorithm below:
+
+   *  AEAD.Encrypt and AEAD.Decrypt - The encryption and decryption
+      functions for the AEAD.  We follow the convention of RFC 5116
+      [RFC5116] and consider the authentication tag part of the
+      ciphertext produced by AEAD.Encrypt (as opposed to a separate
+      field as in SRTP [RFC3711]).
+
+   *  AEAD.Nk - The size of a key for the encryption algorithm, in bytes
+
+   *  AEAD.Nn - The size of a nonce for the encryption algorithm, in
+      bytes
+
+   *  AEAD.Nt - The overhead of the encryption algorithm, in bytes
+      (typically the size of a "tag" that is added to the plaintext)
+
+4.4.1.  Key Selection
+
+   Each SFrame encryption or decryption operation is premised on a
+   single secret base_key, which is labeled with an integer KID value
+   signaled in the SFrame header.
+
+   The sender and receivers need to agree on which key should be used
+   for a given KID.  The process for provisioning keys and their KID
+   values is beyond the scope of this specification, but its security
+   properties will bound the assurances that SFrame provides.  For
+   example, if SFrame is used to provide E2E security against
+   intermediary media nodes, then SFrame keys need to be negotiated in a
+   way that does not make them accessible to these intermediaries.
+
+   For each known KID value, the client stores the corresponding
+   symmetric key base_key.  For keys that can be used for encryption,
+   the client also stores the next counter value CTR to be used when
+   encrypting (initially 0).
+
+   When encrypting a plaintext, the application specifies which KID is
+   to be used, and the counter is incremented after successful
+   encryption.  When decrypting, the base_key for decryption is selected
+   from the available keys using the KID value in the SFrame Header.
+
+   A given key MUST NOT be used for encryption by multiple senders.
+   Such reuse would result in multiple encrypted frames being generated
+   with the same (key, nonce) pair, which harms the protections provided
+   by many AEAD algorithms.  Implementations SHOULD mark each key as
+   usable for encryption or decryption, never both.
+
+   Note that the set of available keys might change over the lifetime of
+   a real-time session.  In such cases, the client will need to manage
+   key usage to avoid media loss due to a key being used to encrypt
+   before all receivers are able to use it to decrypt.  For example, an
+   application may make decryption-only keys available immediately, but
+   delay the use of keys for encryption until (a) all receivers have
+   acknowledged receipt of the new key or (b) a timeout expires.
+
+4.4.2.  Key Derivation
+
+   SFrame encrytion and decryption use a key and salt derived from the
+   base_key associated to a KID.  Given a base_key value, the key and
+   salt are derived using HKDF [RFC5869] as follows:
+
+   sframe_secret = HKDF-Extract(base_key, 'SFrame10')
+   sframe_key = HKDF-Expand(sframe_secret, 'key', AEAD.Nk)
+   sframe_salt = HKDF-Expand(sframe_secret, 'salt', AEAD.Nn)
+
+   The hash function used for HKDF is determined by the ciphersuite in
+   use.
+
+4.4.3.  Encryption
+
+   SFrame encryption uses the AEAD encryption algorithm for the
+   ciphersuite in use.  The key for the encryption is the sframe_key and
+   the nonce is formed by XORing the sframe_salt with the current
+   counter, encoded as a big-endian integer of length AEAD.Nn.
+
+   The encryptor forms an SFrame header using the CTR, and KID values
+   provided.  The encoded header is provided as AAD to the AEAD
+   encryption operation, together with application-provided metadata
+   about the encrypted media.
+
+   def encrypt(S, CTR, KID, metadata, plaintext):
+     sframe_key, sframe_salt = key_store[KID]
+
+     ctr = encode_big_endian(CTR, AEAD.Nn)
+     nonce = xor(sframe_salt, CTR)
+
+     header = encode_sframe_header(CTR, KID)
+     aad = header + metadata
+
+     ciphertext = AEAD.Encrypt(sframe_key, nonce, aad, plaintext)
+     return header + ciphertext
+
+   The metadata input to encryption allows for frame metadata to be
+   authenticated when SFrame is applied per-frame.  After encoding the
+   frame and before packetizing it, the necessary media metadata will be
+   moved out of the encoded frame buffer, to be sent in some channel
+   visibile to the SFU (e.g., an RTP header extension).
+
+   The encrypted payload is then passed to a generic RTP packetized to
+   construct the RTP packets and encrypt it using SRTP keys for the HBH
+   encryption to the media server.
+
+      +----------------+  +---------------+
+      | frame metadata |  |               |
+      +-------+--------+  |               |
+              |           |     frame     |
+              |           |               |
+              |           |               |
+              |           +-------+-------+
+              |                   |
+   header ----+------------------>| AAD
+   +-----+                        |
+   |  S  |                        |
+   +-----+                        |
+   | KID +--+--> sframe_key ----->| Key
+   |     |  |                     |
+   |     |  +--> sframe_salt --+  |
+   +-----+                     |  |
+   | CTR +---------------------+->| Nonce
+   |     |                        |
+   |     |                        |
+   +-----+                        |
+      |                       AEAD.Encrypt
+      |                           |
+      |                           V
+      |                   +-------+-------+
+      |                   |               |
+      |                   |               |
+      |                   |   encrypted   |
+      |                   |     frame     |
+      |                   |               |
+      |                   |               |
+      |                   +-------+-------+
+      |                           |
+      |                  generic RTP packetize
+      |                           |
+      |                           |
+      |    +----------------------+--------.....--------+
+      |    |                      |                     |
+      V    V                      V                     V
+   +---------------+      +---------------+     +---------------+
+   | SFrame header |      |               |     |               |
+   +---------------+      |               |     |               |
+   |               |      |  payload 2/N  | ... |  payload N/N  |
+   |  payload 1/N  |      |               |     |               |
+   |               |      |               |     |               |
+   +---------------+      +---------------+     +---------------+
+
+            Figure 5: Encryption flow with per-frame encryption
+
+4.4.4.  Decryption
+
+   Before decrypting, a client needs to assemble a full SFrame
+   ciphertext.  When SFrame is applied per-packet, this is done by
+   extracting the payload of a decrypted SRTP packet.  When SFrame is
+   applied per-frame, the receiving client buffers all packets that
+   belongs to the same frame using the frame beginning and ending marks
+   in the generic RTP frame header extension.  Once all packets are
+   available and in order, the receiver forms an SFrame ciphertext by
+   concatenating their payloads, then passes the ciphertext to SFrame
+   for decryption.
+
+   The KID field in the SFrame header is used to find the right key and
+   salt for the encrypted frame, and the CTR field is used to construct
+   the nonce.
+
+   def decrypt(metadata, sframe):
+     CTR, KID, ciphertext = parse_ciphertext(sframe)
+
+     sframe_key, sframe_salt = key_store[KID]
+
+     ctr = encode_big_endian(CTR, AEAD.Nn)
+     nonce = xor(sframe_salt, ctr)
+     aad = header + metadata
+
+     return AEAD.Decrypt(sframe_key, nonce, aad, ciphertext)
+
+   If a ciphertext fails to decrypt because there is no key available
+   for the KID in the SFrame header, the client MAY buffer the
+   ciphertext and retry decryption once a key with that KID is received.
+
+4.4.5.  Duplicate Frames
+
+   Unlike messaging application, in video calls, receiving a duplicate
+   frame doesn't necessary mean the client is under a replay attack,
+   there are other reasons that might cause this, for example the sender
+   might just be sending them in case of packet loss.  SFrame decryptors
+   use the highest received frame counter to protect against this.  It
+   allows only older frame pithing a short interval to support out of
+   order delivery.
+
+4.5.  Ciphersuites
+
+   Each SFrame session uses a single ciphersuite that specifies the
+   following primitives:
+
+   *  A hash function used for key derivation
+
+   *  An AEAD encryption algorithm [RFC5116] used for frame encryption,
+      optionally with a truncated authentication tag
+
+   This document defines the following ciphersuites:
+
+    +========+============================+==+==+====+====+===========+
+    | Value  | Name                       |Nh|Nk| Nn | Nt | Reference |
+    +========+============================+==+==+====+====+===========+
+    | 0x0001 | AES_CTR_128_HMAC_SHA256_80 |32|16| 12 | 10 | RFC XXXX  |
+    +--------+----------------------------+--+--+----+----+-----------+
+    | 0x0002 | AES_CTR_128_HMAC_SHA256_64 |32|16| 12 | 8  | RFC XXXX  |
+    +--------+----------------------------+--+--+----+----+-----------+
+    | 0x0003 | AES_CTR_128_HMAC_SHA256_32 |32|16| 12 | 4  | RFC XXXX  |
+    +--------+----------------------------+--+--+----+----+-----------+
+    | 0x0004 | AES_GCM_128_SHA256_128     |32|16| 12 | 16 | RFC XXXX  |
+    +--------+----------------------------+--+--+----+----+-----------+
+    | 0x0005 | AES_GCM_256_SHA512_128     |64|32| 12 | 16 | RFC XXXX  |
+    +--------+----------------------------+--+--+----+----+-----------+
+
+                                  Table 1
+
+   In the suite names, the length of the authentication tag is indicated
+   by the last value: "_128" indicates a hundred-twenty-eight-bit tag,
+   "_80" indicates a eighty-bit tag, "_64" indicates a sixty-four-bit
+   tag and "_32" indicates a thirty-two-bit tag.
+
+   In a session that uses multiple media streams, different ciphersuites
+   might be configured for different media streams.  For example, in
+   order to conserve bandwidth, a session might use a ciphersuite with
+   eighty-bit tags for video frames and another ciphersuite with thirty-
+   two-bit tags for audio frames.
+
+4.5.1.  AES-CTR with SHA2
+
+   In order to allow very short tag sizes, we define a synthetic AEAD
+   function using the authenticated counter mode of AES together with
+   HMAC for authentication.  We use an encrypt-then-MAC approach as in
+   SRTP [RFC3711].
+
+   Before encryption or decryption, encryption and authentication
+   subkeys are derived from the single AEAD key using HKDF.  The subkeys
+   are derived as follows, where Nk represents the key size for the AES
+   block cipher in use and Nh represents the output size of the hash
+   function:
+
+   def derive_subkeys(sframe_key):
+     aead_secret = HKDF-Extract(sframe_key, 'SFrame10 AES CTR AEAD')
+     enc_key = HKDF-Expand(aead_secret, 'enc', Nk)
+     auth_key = HKDF-Expand(aead_secret, 'auth', Nh)
+     return enc_key, auth_key
+
+   The AEAD encryption and decryption functions are then composed of
+   individual calls to the CTR encrypt function and HMAC.  The resulting
+   MAC value is truncated to a number of bytes tag_len fixed by the
+   ciphersuite.
+
+   def compute_tag(auth_key, nonce, aad, ct):
+     aad_len = encode_big_endian(len(aad), 8)
+     ct_len = encode_big_endian(len(ct), 8)
+     auth_data = aad_len + ct_len + nonce + aad + ct
+     tag = HMAC(auth_key, auth_data)
+     return truncate(tag, tag_len)
+
+   def AEAD.Encrypt(key, nonce, aad, pt):
+     enc_key, auth_key = derive_subkeys(key)
+     ct = AES-CTR.Encrypt(enc_key, nonce, pt)
+     tag = compute_tag(auth_key, nonce, aad, ct)
+     return ct + tag
+
+   def AEAD.Decrypt(key, nonce, aad, ct):
+     inner_ct, tag = split_ct(ct, tag_len)
+
+     enc_key, auth_key = derive_subkeys(key)
+     candidate_tag = compute_tag(auth_key, nonce, aad, inner_ct)
+     if !constant_time_equal(tag, candidate_tag):
+       raise Exception("Authentication Failure")
+
+     return AES-CTR.Decrypt(enc_key, nonce, inner_ct)
+
+5.  Key Management
+
+   SFrame must be integrated with an E2E key management framework to
+   exchange and rotate the keys used for SFrame encryption.  The key
+   management framework provides the following functions:
+
+   *  Provisioning KID/base_key mappings to participating clients
+
+   *  Updating the above data as clients join or leave
+
+   It is up to the application to define a rotation schedule for keys.
+   For example, one application might have an ephemeral group for every
+   call and keep rotating key when end points joins or leave the call,
+   while another application could have a persistent group that can be
+   used for multiple calls and simply derives ephemeral symmetric keys
+   for a specific call.
+
+5.1.  Sender Keys
+
+   If the participants in a call have a pre-existing E2E-secure channel,
+   they can use it to distribute SFrame keys.  Each client participating
+   in a call generates a fresh encryption key.  The client then uses the
+   E2E-secure channel to send their encryption key to the other
+   participants.
+
+   In this scheme, it is assumed that receivers have a signal outside of
+   SFrame for which client has sent a given frame, for example the RTP
+   SSRC.  SFrame KID values are then used to distinguish generations of
+   the sender's key.  At the beginning of a call, each sender encrypts
+   with KID=0.  Thereafter, the sender can ratchet their key forward for
+   forward secrecy:
+
+   sender_key[i+1] = HKDF-Expand(
+                       HKDF-Extract(sender_key[i], 'SFrame10 ratchet'),
+                         '', AEAD.Nk)
+
+   The sender signals such an update by incrementing their KID value.  A
+   receiver who receives from a sender with a new KID computes the new
+   key as above.  The old key may be kept for some time to allow for
+   out-of-order delivery, but should be deleted promptly.
+
+   If a new participant joins mid-call, they will need to receive from
+   each sender (a) the current sender key for that sender and (b) the
+   current KID value for the sender.  Evicting a participant requires
+   each sender to send a fresh sender key to all receivers.
+
+5.2.  MLS
+
+   The Messaging Layer Security (MLS) protocol provides group
+   authenticated key exchange [I-D.ietf-mls-architecture]
+   [I-D.ietf-mls-protocol].  In principle, it could be used to
+   instantiate the sender key scheme above, but it can also be used more
+   efficiently directly.
+
+   MLS creates a linear sequence of keys, each of which is shared among
+   the members of a group at a given point in time.  When a member joins
+   or leaves the group, a new key is produced that is known only to the
+   augmented or reduced group.  Each step in the lifetime of the group
+   is know as an "epoch", and each member of the group is assigned an
+   "index" that is constant for the time they are in the group.
+
+   In SFrame, we derive per-sender base_key values from the group secret
+   for an epoch, and use the KID field to signal the epoch and sender
+   index.  First, we use the MLS exporter to compute a shared SFrame
+   secret for the epoch.
+
+   sframe_epoch_secret = MLS-Exporter("SFrame 10 MLS", "", AEAD.Nk)
+
+   sender_base_key[index] = HKDF-Expand(sframe_epoch_secret,
+                              encode_big_endian(index, 4), AEAD.Nk)
+
+   For compactness, do not send the whole epoch number.  Instead, we
+   send only its low-order E bits.  Note that E effectively defines a
+   re-ordering window, since no more than 2^E epoch can be active at a
+   given time.  Receivers MUST be prepared for the epoch counter to roll
+   over, removing an old epoch when a new epoch with the same E lower
+   bits is introduced.  (Sender indices cannot be similarly compressed.)
+
+   KID = (sender_index << E) + (epoch % (1 << E))
+
+   Once an SFrame stack has been provisioned with the
+   sframe_epoch_secret for an epoch, it can compute the required KIDs
+   and sender_base_key values on demand, as it needs to encrypt/decrypt
+   for a given member.
+
+     ...
+            |
+   Epoch 17 +--+-- index=33 --> KID = 0x211
+            |  |
+            |  +-- index=51 --> KID = 0x331
+            |
+            |
+   Epoch 16 +--+-- index=2 ---> KID = 0x20
+            |
+            |
+   Epoch 15 +--+-- index=3 ---> KID = 0x3f
+            |  |
+            |  +-- index=5 ---> KID = 0x5f
+            |
+            |
+   Epoch 14 +--+-- index=3 ---> KID = 0x3e
+            |  |
+            |  +-- index=7 ---> KID = 0x7e
+            |  |
+            |  +-- index=20 --> KID = 0x14e
+            |
+     ...
+
+6.  Media Considerations
+
+6.1.  SFU
+
+   Selective Forwarding Units (SFUs) as described in Section 3.7 of
+   [RFC7667] receives the RTP streams from each participant and selects
+   which ones should be forwarded to each of the other participants.
+   There are several approaches about how to do this stream selection
+   but in general, in order to do so, the SFU needs to access metadata
+   associated to each frame and modify the RTP information of the
+   incoming packets when they are transmitted to the received
+   participants.
+
+   This section describes how this normal SFU modes of operation
+   interacts with the E2EE provided by SFrame
+
+6.1.1.  LastN and RTP stream reuse
+
+   The SFU may choose to send only a certain number of streams based on
+   the voice activity of the participants.  To reduce the number of SDP
+   O/A required to establish a new RTP stream, the SFU may decide to
+   reuse previously existing RTP sessions or even pre-allocate a
+   predefined number of RTP streams and choose in each moment in time
+   which participant media will be sending through it.
+
+   This means that in the same RTP stream (defined by either SSRC or
+   MID) may carry media from different streams of different
+   participants.  As different keys are used by each participant for
+   encoding their media, the receiver will be able to verify which is
+   the sender of the media coming within the RTP stream at any given
+   point if time, preventing the SFU trying to impersonate any of the
+   participants with another participant's media.
+
+   Note that in order to prevent impersonation by a malicious
+   participant (not the SFU), a mechanism based on digital signature
+   would be required.  SFrame does not protect against such attacks.
+
+6.1.2.  Simulcast
+
+   When using simulcast, the same input image will produce N different
+   encoded frames (one per simulcast layer) which would be processed
+   independently by the frame encryptor and assigned an unique counter
+   for each.
+
+6.1.3.  SVC
+
+   In both temporal and spatial scalability, the SFU may choose to drop
+   layers in order to match a certain bitrate or forward specific media
+   sizes or frames per second.  In order to support it, the sender MUST
+   encode each spatial layer of a given picture in a different frame.
+   That is, an RTP frame may contain more than one SFrame encrypted
+   frame with an incrementing frame counter.
+
+6.2.  Video Key Frames
+
+   Forward and Post-Compromise Security requires that the e2ee keys are
+   updated anytime a participant joins/leave the call.
+
+   The key exchange happens async and on a different path than the SFU
+   signaling and media.  So it may happen that when a new participant
+   joins the call and the SFU side requests a key frame, the sender
+   generates the e2ee encrypted frame with a key not known by the
+   receiver, so it will be discarded.  When the sender updates his
+   sending key with the new key, it will send it in a non-key frame, so
+   the receiver will be able to decrypt it, but not decode it.
+
+   Receiver will re-request an key frame then, but due to sender and sfu
+   policies, that new key frame could take some time to be generated.
+
+   If the sender sends a key frame when the new e2ee key is in use, the
+   time required for the new participant to display the video is
+   minimized.
+
+6.3.  Partial Decoding
+
+   Some codes support partial decoding, where it can decrypt individual
+   packets without waiting for the full frame to arrive, with SFrame
+   this won't be possible because the decoder will not access the
+   packets until the entire frame is arrived and decrypted.
+
+7.  Security Considerations
+
+7.1.  No Per-Sender Authentication
+
+   SFrame does not provide per-sender authentication of media data.  Any
+   sender in a session can send media that will be associated with any
+   other sender.  This is because SFrame uses symmetric encryption to
+   protect media data, so that any receiver also has the keys required
+   to encrypt packets for the sender.
+
+7.2.  Key Management
+
+   Key exchange mechanism is out of scope of this document, however
+   every client MUST change their keys when new clients joins or leaves
+   the call for "Forward Secrecy" and "Post Compromise Security".
+
+7.3.  Authentication tag length
+
+   The cipher suites defined in this draft use short authentication tags
+   for encryption, however it can easily support other ciphers with full
+   authentication tag if the short ones are proved insecure.
+
+8.  IANA Considerations
+
+   This document makes no requests of IANA.
+
+9.  References
+
+9.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119,
+              DOI 10.17487/RFC2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC5116]  McGrew, D., "An Interface and Algorithms for Authenticated
+              Encryption", RFC 5116, DOI 10.17487/RFC5116, January 2008,
+              <https://www.rfc-editor.org/rfc/rfc5116>.
+
+   [RFC5869]  Krawczyk, H. and P. Eronen, "HMAC-based Extract-and-Expand
+              Key Derivation Function (HKDF)", RFC 5869,
+              DOI 10.17487/RFC5869, May 2010,
+              <https://www.rfc-editor.org/rfc/rfc5869>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, DOI 10.17487/RFC8174,
+              May 2017, <https://www.rfc-editor.org/rfc/rfc8174>.
+
+9.2.  Informative References
+
+   [I-D.ietf-mls-architecture]
+              Beurdouche, B., Rescorla, E., Omara, E., Inguva, S., and
+              A. Duric, "The Messaging Layer Security (MLS)
+              Architecture", Work in Progress, Internet-Draft, draft-
+              ietf-mls-architecture-10, 16 December 2022,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-mls-
+              architecture-10>.
+
+   [I-D.ietf-mls-protocol]
+              Barnes, R., Beurdouche, B., Robert, R., Millican, J.,
+              Omara, E., and K. Cohn-Gordon, "The Messaging Layer
+              Security (MLS) Protocol", Work in Progress, Internet-
+              Draft, draft-ietf-mls-protocol-17, 19 December 2022,
+              <https://datatracker.ietf.org/doc/html/draft-ietf-mls-
+              protocol-17>.
+
+   [I-D.murillo-perc-lite]
+              Murillo, S. G. and A. Gouaillard, "End to End Media
+              Encryption Procedures", Work in Progress, Internet-Draft,
+              draft-murillo-perc-lite-01, 12 May 2020,
+              <https://datatracker.ietf.org/doc/html/draft-murillo-perc-
+              lite-01>.
+
+   [RFC3711]  Baugher, M., McGrew, D., Naslund, M., Carrara, E., and K.
+              Norrman, "The Secure Real-time Transport Protocol (SRTP)",
+              RFC 3711, DOI 10.17487/RFC3711, March 2004,
+              <https://www.rfc-editor.org/rfc/rfc3711>.
+
+   [RFC7667]  Westerlund, M. and S. Wenger, "RTP Topologies", RFC 7667,
+              DOI 10.17487/RFC7667, November 2015,
+              <https://www.rfc-editor.org/rfc/rfc7667>.
+
+   [RFC8723]  Jennings, C., Jones, P., Barnes, R., and A.B. Roach,
+              "Double Encryption Procedures for the Secure Real-Time
+              Transport Protocol (SRTP)", RFC 8723,
+              DOI 10.17487/RFC8723, April 2020,
+              <https://www.rfc-editor.org/rfc/rfc8723>.
+
+   [TestVectors]
+              "SFrame Test Vectors", 2021,
+              <https://github.com/eomara/sframe/blob/master/test-
+              vectors.json>.
+
+Appendix A.  Acknowledgements
+
+   The authors wish to specially thank Dr. Alex Gouaillard as one of the
+   early contributors to the document.  His passion and energy were key
+   to the design and development of SFrame.
+
+Appendix B.  Overhead
+
+   The encryption overhead will vary between audio and video streams,
+   because in audio each packet is considered a separate frame, so it
+   will always have extra MAC and IV, however a video frame usually
+   consists of multiple RTP packets.
+
+   The number of bytes overhead per frame is calculated as the following
+
+   1 + FrameCounter length + 4
+
+   The constant 1 is the SFrame header byte and 4 bytes for the HBH
+   authentication tag for both audio and video packets.
+
+B.1.  Audio
+
+   Using three different audio frame durations
+
+   *  20ms (50 packets/s)
+
+   *  40ms (25 packets/s)
+
+   *  100ms (10 packets/s)
+
+   Up to 3 bytes frame counter (3.8 days of data for 20ms frame
+   duration) and 4 bytes fixed MAC length.
+
+       +=============+===========+==========+==========+===========+
+       | Counter len |  Packets  | Overhead | Overhead |  Overhead |
+       +=============+===========+==========+==========+===========+
+       |             |           | bps@20ms | bps@40ms | bps@100ms |
+       +-------------+-----------+----------+----------+-----------+
+       |      1      |   0-255   |   2400   |   1200   |    480    |
+       +-------------+-----------+----------+----------+-----------+
+       |      2      | 255 - 65K |   2800   |   1400   |    560    |
+       +-------------+-----------+----------+----------+-----------+
+       |      3      | 65K - 16M |   3200   |   1600   |    640    |
+       +-------------+-----------+----------+----------+-----------+
+
+                                  Table 2
+
+B.2.  Video
+
+   The per-stream overhead bits per second as calculated for the
+   following video encodings:
+
+   *  30fps @ 1000Kbps (4 packets per frame)
+
+   *  30fps @ 512Kbps (2 packets per frame)
+
+   *  15fps @ 200Kbps (2 packets per frame)
+
+   *  7.5fps @ 30Kbps (1 packet per frame)
+
+   Overhead bps = (Counter length + 1 + 4 ) * 8 * fps
+
+     +=============+===========+===========+===========+============+
+     | Counter len |   Frames  |  Overhead |  Overhead |  Overhead  |
+     +=============+===========+===========+===========+============+
+     |             |           | bps@30fps | bps@15fps | bps@7.5fps |
+     +-------------+-----------+-----------+-----------+------------+
+     |      1      |   0-255   |    1440   |    1440   |    720     |
+     +-------------+-----------+-----------+-----------+------------+
+     |      2      | 256 - 65K |    1680   |    1680   |    840     |
+     +-------------+-----------+-----------+-----------+------------+
+     |      3      | 56K - 16M |    1920   |    1920   |    960     |
+     +-------------+-----------+-----------+-----------+------------+
+     |      4      |  16M - 4B |    2160   |    2160   |    1080    |
+     +-------------+-----------+-----------+-----------+------------+
+
+                                 Table 3
+
+B.3.  SFrame vs PERC-lite
+
+   [RFC8723] has significant overhead over SFrame because the overhead
+   is per packet, not per frame, and OHB (Original Header Block) which
+   duplicates any RTP header/extension field modified by the SFU.
+
+   [I-D.murillo-perc-lite] https://mailarchive.ietf.org/arch/msg/perc/
+   SB0qMHWz6EsDtz3yIEX0HWp5IEY/ is slightly better because it doesn’t
+   use the OHB anymore, however it still does per packet encryption
+   using SRTP.
+
+   Below the the overheard in [I-D.murillo-perc-lite] implemented by
+   Cosmos Software which uses extra 11 bytes per packet to preserve the
+   PT, SEQ_NUM, TIME_STAMP and SSRC fields in addition to the extra MAC
+   tag per packet.
+
+   OverheadPerPacket = 11 + MAC length Overhead bps = PacketPerSecond *
+   OverHeadPerPacket * 8
+
+   Similar to SFrame, we will assume the HBH authentication tag length
+   will always be 4 bytes for audio and video even though it is not the
+   case in this [I-D.murillo-perc-lite] implementation
+
+B.3.1.  Audio
+
+      +===================+===================+====================+
+      | Overhead bps@20ms | Overhead bps@40ms | Overhead bps@100ms |
+      +===================+===================+====================+
+      |        6000       |        3000       |        1200        |
+      +-------------------+-------------------+--------------------+
+
+                                 Table 4
+
+B.3.2.  Video
+
+   +=======================+====================+=====================+
+   |   Overhead bps@30fps  | Overhead bps@15fps | Overhead bps@7.5fps |
+   +=======================+====================+=====================+
+   | (4 packets per frame) |   (2 packets per   |    (1 packet per    |
+   |                       |       frame)       |        frame)       |
+   +-----------------------+--------------------+---------------------+
+   |         14400         |        7200        |         3600        |
+   +-----------------------+--------------------+---------------------+
+
+                                 Table 5
+
+   For a conference with a single incoming audio stream (@ 50 pps) and 4
+   incoming video streams (@200 Kbps), the savings in overhead is 34800
+   - 9600 = ~25 Kbps, or ~3%.
+
+Appendix C.  Test Vectors
+
+   This section provides a set of test vectors that implementations can
+   use to verify that they correctly implement SFrame encryption and
+   decryption.  For each ciphersuite, we provide:
+
+   *  [in] The base_key value (hex encoded)
+
+   *  [out] The secret, key, and salt values derived from the base_key
+      (hex encoded)
+
+   *  A plaintext value that is encrypted in the following encryption
+      cases
+
+   *  A sequence of encryption cases, including:
+
+      -  [in] The KID and CTR values to be included in the header
+
+      -  [out] The resulting encoded header (hex encoded)
+
+      -  [out] The nonce computed from the salt and CTR values
+
+      -  The ciphertext resulting from encrypting the plaintext with
+         these parameters (hex encoded)
+
+   An implementation should reproduce the output values given the input
+   values:
+
+   *  An implementation should be able to encrypt with the input values
+      and the plaintext to produce the ciphertext.
+
+   *  An implementation must be able to decrypt with the input values
+      and the ciphertext to generate the plaintext.
+
+   Line breaks and whitespace within values are inserted to conform to
+   the width requirements of the RFC format.  They should be removed
+   before use.  These test vectors are also available in JSON format at
+   [TestVectors].
+
+C.1.  AES_CTR_128_HMAC_SHA256_4
+
+   CipherSuite:    0x01
+   Base Key:       101112131415161718191a1b1c1d1e1f
+   Key:            343d3290f5c0b936415bea9a43c6f5a2
+   Salt:           42d662fbad5cd81eb3aad79a
+   Plaintext:      46726f6d2068656176656e6c79206861
+                   726d6f6e79202f2f205468697320756e
+                   6976657273616c206672616d65206265
+                   67616e
+
+   KID:            0x7
+   CTR:            0x0
+   Header:         1700
+   Nonce:          42d662fbad5cd81eb3aad79a
+   Ciphertext:     1700c5095af9dbbbed6a952de114ea7b
+                   42768509f1ffc9749abb1e95bf4514d8
+                   d82a0eef4b5ecac16fa193977fa1aa1c
+                   9fa5c7e73093ab2a43
+
+   KID:            0x7
+   CTR:            0x1
+   Header:         1701
+   Nonce:          42d662fbad5cd81eb3aad79b
+   Ciphertext:     1701559e262525382885c6c93be8f61a
+                   9064db2dd1e1e96ab1dbd829ca4af4f4
+                   5f2b97a4889217a3f8a2159fb8201b7d
+                   71db01702bd4bab5c7
+
+   KID:            0x7
+   CTR:            0x2
+   Header:         1702
+   Nonce:          42d662fbad5cd81eb3aad798
+   Ciphertext:     17020a8f21e052eaa09e50da0a909d15
+                   6cc55b9ef2f2abbcca765f7af3cfb1af
+                   234e3eac1dbc376631c83cf1ff1f8ab3
+                   39dbc41044cc930d87
+
+   KID:            0xf
+   CTR:            0xaa
+   Header:         190faa
+   Nonce:          42d662fbad5cd81eb3aad730
+   Ciphertext:     190faa9c65aa5b167873f25827f17bc3
+                   4879a4aaa6b38dd9584472e1849d5da5
+                   1555f288d08f03166a5f26af01794006
+                   255c88b58986246287c9
+
+   KID:            0x1ff
+   CTR:            0xaa
+   Header:         1a01ffaa
+   Nonce:          42d662fbad5cd81eb3aad730
+   Ciphertext:     1a01ffaa9c65aa5b167873f25827f17b
+                   c34879a4aaa6b38dd9584472e1849d5d
+                   a51555f288d08f03166a5f26af017940
+                   06255c88b589863003872e
+
+   KID:            0x1ff
+   CTR:            0xaaaa
+   Header:         2a01ffaaaa
+   Nonce:          42d662fbad5cd81eb3aa7d30
+   Ciphertext:     2a01ffaaaa990cbeb4ae2e3a76be8bb9
+                   54b62591e791d0fa53c0553bc1d1e021
+                   d270b1a10688cd89195203b019789253
+                   73b04f9c08c3a4e5fb0173ef
+
+   KID:            0xffffffffffffff
+   CTR:            0xffffffffffffff
+   Header:         7fffffffffffffffffffffffffffff
+   Nonce:          42d662fbada327e14c552865
+   Ciphertext:     7fffffffffffffffffffffffffffff41
+                   2c43c8077c286f7df3dd9988d1bd033f
+                   1067493e09421e5bfc363e50a3c803b4
+                   da9239514cb924dbcb5f33e33112083e
+                   99103ef272e8
+
+C.2.  AES_CTR_128_HMAC_SHA256_8
+
+   CipherSuite:    0x02
+   Base Key:       202122232425262728292a2b2c2d2e2f
+   Key:            3fce747d505e46ec9b92d9f58ee7a5d4
+   Salt:           77fbf5f1d82c73f6d2b353c9
+   Plaintext:      46726f6d2068656176656e6c79206861
+                   726d6f6e79202f2f205468697320756e
+                   6976657273616c206672616d65206265
+                   67616e
+
+   KID:            0x7
+   CTR:            0x0
+   Header:         1700
+   Nonce:          77fbf5f1d82c73f6d2b353c9
+   Ciphertext:     17009d89e5753e06edf3025f1ccd70b0
+                   95ebaf10c250e11da740f50f57b6ce86
+                   0d7321dfa49688a2cd6c6d9a71ae9d5c
+                   14ad0978efe0216ae5f6788ffe
+
+   KID:            0x7
+   CTR:            0x1
+   Header:         1701
+   Nonce:          77fbf5f1d82c73f6d2b353c8
+   Ciphertext:     1701becd2e9d10e3eed586491b3e0ece
+                   dba89407ae2151787c5117b55707d6b8
+                   a0754f4dc937e30ebdf7cafbd3769d65
+                   85d7991b1aa6f36e418fdec6fa
+
+   KID:            0x7
+   CTR:            0x2
+   Header:         1702
+   Nonce:          77fbf5f1d82c73f6d2b353cb
+   Ciphertext:     170298508be6b16d034f15b504ced45a
+                   86d1bb43ed7cd3a62bf25557d1b082b0
+                   4e8e6ba6fe76160835dd8953e1be9640
+                   c988627ea4f1bb846e87523f8b
+
+   KID:            0xf
+   CTR:            0xaa
+   Header:         190faa
+   Nonce:          77fbf5f1d82c73f6d2b35363
+   Ciphertext:     190faae7eec4b0556ddfb8068998351c
+                   d670ce95f0ce9cd4c6dca2eeee73fb14
+                   d20a0d0fd487337ed43fa7f98dad0995
+                   b8b870325aa349ac0590c2745d5d
+
+   KID:            0x1ff
+   CTR:            0xaa
+   Header:         1a01ffaa
+   Nonce:          77fbf5f1d82c73f6d2b35363
+   Ciphertext:     1a01ffaae7eec4b0556ddfb806899835
+                   1cd670ce95f0ce9cd4c6dca2eeee73fb
+                   14d20a0d0fd487337ed43fa7f98dad09
+                   95b8b870325aa31d576e8a34093320
+
+   KID:            0x1ff
+   CTR:            0xaaaa
+   Header:         2a01ffaaaa
+   Nonce:          77fbf5f1d82c73f6d2b3f963
+   Ciphertext:     2a01ffaaaa8c1789aa0abcd6abc27006
+                   aae4df5cba4ba07f8113080e9726baac
+                   d16c18539974a6204a36b9dc3dcd36ed
+                   9ab48e590d95d4ad1b05f8375508c55d
+
+   KID:            0xffffffffffffff
+   CTR:            0xffffffffffffff
+   Header:         7fffffffffffffffffffffffffffff
+   Nonce:          77fbf5f1d8d38c092d4cac36
+   Ciphertext:     7fffffffffffffffffffffffffffffa9
+                   bc6c7edde0fdfd13255a5b145c5ce84d
+                   b8f8960858eb998b8ea8f3e770160150
+                   813c5806441b64251bdd2be9e8cec138
+                   6b6f5e73eaa6c19e6555
+
+C.3.  AES_GCM_128_SHA256
+
+   CipherSuite:    0x03
+   Base Key:       303132333435363738393a3b3c3d3e3f
+   Key:            2ea2e8163ff56c0613e6fa9f20a213da
+   Salt:           a80478b3f6fba19983d540d5
+   Plaintext:      46726f6d2068656176656e6c79206861
+                   726d6f6e79202f2f205468697320756e
+                   6976657273616c206672616d65206265
+                   67616e
+
+   KID:            0x7
+   CTR:            0x0
+   Header:         1700
+   Nonce:          a80478b3f6fba19983d540d5
+   Ciphertext:     17000e426255e47ed70dd7d15d69d759
+                   bf459032ca15f5e8b2a91e7d348aa7c1
+                   86d403f620801c495b1717a35097411a
+                   a97cbb140671eb3b49ac3775926db74d
+                   57b91e8e6c
+
+   KID:            0x7
+   CTR:            0x1
+   Header:         1701
+   Nonce:          a80478b3f6fba19983d540d4
+   Ciphertext:     170103bbafa34ada8a6b9f2066bc34a1
+                   959d87384c9f4b1ce34fed58e938bde1
+                   43393910b1aeb55b48d91d5b0db3ea67
+                   e3d0e02b843afd41630c940b1948e72d
+                   d45396a43a
+
+   KID:            0x7
+   CTR:            0x2
+   Header:         1702
+   Nonce:          a80478b3f6fba19983d540d7
+   Ciphertext:     170258d58adebd8bf6f3cc0c1fcacf34
+                   ba4d7a763b2683fe302a57f1be7f2a27
+                   4bf81b2236995fec1203cadb146cd402
+                   e1c52d5e6a10989dfe0f4116da1ee4c2
+                   fad0d21f8f
+
+   KID:            0xf
+   CTR:            0xaa
+   Header:         190faa
+   Nonce:          a80478b3f6fba19983d5407f
+   Ciphertext:     190faad0b1743bf5248f90869c945636
+                   6d55724d16bbe08060875815565e90b1
+                   14f9ccbdba192422b33848a1ae1e3bd2
+                   66a001b2f5bb727112772e0072ea8679
+                   ca1850cf11d8
+
+   KID:            0x1ff
+   CTR:            0xaa
+   Header:         1a01ffaa
+   Nonce:          a80478b3f6fba19983d5407f
+   Ciphertext:     1a01ffaad0b1743bf5248f90869c9456
+                   366d55724d16bbe08060875815565e90
+                   b114f9ccbdba192422b33848a1ae1e3b
+                   d266a001b2f5bbc9c63bd3973c19bd57
+                   127f565380ed4a
+
+   KID:            0x1ff
+   CTR:            0xaaaa
+   Header:         2a01ffaaaa
+   Nonce:          a80478b3f6fba19983d5ea7f
+   Ciphertext:     2a01ffaaaa9de65e21e4f1ca2247b879
+                   43c03c5cb7b182090e93d508dcfb76e0
+                   8174c6397356e682d2eaddabc0b3c101
+                   8d2c13c3570f61c1beaab805f27b565e
+                   1329a823a7a649b6
+
+   KID:            0xffffffffffffff
+   CTR:            0xffffffffffffff
+   Header:         7fffffffffffffffffffffffffffff
+   Nonce:          a80478b3f6045e667c2abf2a
+   Ciphertext:     7fffffffffffffffffffffffffffff09
+                   981bdcdad80e380b6f74cf6afdbce946
+                   839bedadd57578bfcd809dbcea535546
+                   cc24660613d2761adea852155785011e
+                   633534f4ecc3b8257c8d34321c27854a
+                   1422
+
+C.4.  AES_GCM_256_SHA512
+
+   CipherSuite:    0x04
+   Base Key:       404142434445464748494a4b4c4d4e4f
+                   505152535455565758595a5b5c5d5e5f
+   Key:            436774b0b5ae45633d96547f8f3cb06c
+                   8e6628eff2e4255b5c4d77e721aa3355
+   Salt:           31ed26f90a072e6aee646298
+   Plaintext:      46726f6d2068656176656e6c79206861
+                   726d6f6e79202f2f205468697320756e
+                   6976657273616c206672616d65206265
+                   67616e
+
+   KID:            0x7
+   CTR:            0x0
+   Header:         1700
+   Nonce:          31ed26f90a072e6aee646298
+   Ciphertext:     1700f3e297c1e95207710bd31ccc4ba3
+                   96fbef7b257440bde638ff0f3c891154
+                   0136df61b26220249d6c432c245ae8d5
+                   5ef45bfccf32530a15aeaaf313a03838
+                   e51bd45652
+
+   KID:            0x7
+   CTR:            0x1
+   Header:         1701
+   Nonce:          31ed26f90a072e6aee646299
+   Ciphertext:     170193268b0bf030071bff443bb6b447
+                   1bdfb1cc81bc9625f4697b0336ff4665
+                   d15f152f02169448d8a967fb06359a87
+                   d2145398de0ce3fbe257b0992a3da153
+                   7590459f3c
+
+   KID:            0x7
+   CTR:            0x2
+   Header:         1702
+   Nonce:          31ed26f90a072e6aee64629a
+   Ciphertext:     1702649691ba27c4c01a41280fba4657
+                   c03fa7fe21c8f5c862e9094227c3ca3e
+                   c0d9468b1a2cb060ff0978f25a24e6b1
+                   06f5a6e1053c1b8f5fce794d88a0e481
+                   8c081e18ea
+
+   KID:            0xf
+   CTR:            0xaa
+   Header:         190faa
+   Nonce:          31ed26f90a072e6aee646232
+   Ciphertext:     190faa2858c10b5ddd231c1f26819490
+                   521678603a050448d563c503b1fd890d
+                   02ead01d754f074ecb6f32da9b2f3859
+                   f380b4f47d4edd1e15f42f9a2d7ecfac
+                   99067e238321
+
+   KID:            0x1ff
+   CTR:            0xaa
+   Header:         1a01ffaa
+   Nonce:          31ed26f90a072e6aee646232
+   Ciphertext:     1a01ffaa2858c10b5ddd231c1f268194
+                   90521678603a050448d563c503b1fd89
+                   0d02ead01d754f074ecb6f32da9b2f38
+                   59f380b4f47d4e3bf7040eb10ec25b81
+                   26b2ce7b1d9d31
+
+   KID:            0x1ff
+   CTR:            0xaaaa
+   Header:         2a01ffaaaa
+   Nonce:          31ed26f90a072e6aee64c832
+   Ciphertext:     2a01ffaaaad9bc6a258a07d210a814d5
+                   45eca70321c0e87498ada6e5c708b7ea
+                   d162ffcf4fbaba1eb82650590a87122b
+                   4d95fe36bd88b278812166d26e046ed0
+                   a530b7ee232ee0f2
+
+   KID:            0xffffffffffffff
+   CTR:            0xffffffffffffff
+   Header:         7fffffffffffffffffffffffffffff
+   Nonce:          31ed26f90af8d195119b9d67
+   Ciphertext:     7fffffffffffffffffffffffffffffaf
+                   480d4779ce0c02b5137ee6a61e026c04
+                   ac999cb0c97319feceeb258d58df23bc
+                   e14979e5c67a431777b34498062e72f9
+                   39ca42ec84ffbc7b50eff923f515a2df
+                   760c
+
+Authors' Addresses
+
+   Emad Omara
+   Apple
+   Email: eomara@apple.com
+
+
+   Justin Uberti
+   Google
+   Email: juberti@google.com
+
+
+   Sergio Garcia Murillo
+   CoSMo Software
+   Email: sergio.garcia.murillo@cosmosoftware.io
+
+
+   Richard L. Barnes (editor)
+   Cisco
+   Email: rlb@ipv.sx
+
+
+   Youenn Fablet
+   Apple
+   Email: youenn@apple.com
