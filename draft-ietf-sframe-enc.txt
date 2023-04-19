@@ -5,14 +5,14 @@
 Network Working Group                                           E. Omara
 Internet-Draft                                                     Apple
 Intended status: Standards Track                               J. Uberti
-Expires: 14 September 2023                                        Google
+Expires: 21 October 2023                                          Google
                                                               S. Murillo
                                                           CoSMo Software
                                                        R. L. Barnes, Ed.
                                                                    Cisco
                                                                Y. Fablet
                                                                    Apple
-                                                           13 March 2023
+                                                           19 April 2023
 
 
                          Secure Frame (SFrame)
@@ -63,7 +63,7 @@ Status of This Memo
    time.  It is inappropriate to use Internet-Drafts as reference
    material or to cite them other than as "work in progress."
 
-   This Internet-Draft will expire on 14 September 2023.
+   This Internet-Draft will expire on 21 October 2023.
 
 Copyright Notice
 
@@ -940,9 +940,9 @@ Alice |            (per-frame)   |     (per-packet)   |        |        |
               Barnes, R., Beurdouche, B., Robert, R., Millican, J.,
               Omara, E., and K. Cohn-Gordon, "The Messaging Layer
               Security (MLS) Protocol", Work in Progress, Internet-
-              Draft, draft-ietf-mls-protocol-17, 19 December 2022,
+              Draft, draft-ietf-mls-protocol-20, 27 March 2023,
               <https://datatracker.ietf.org/doc/html/draft-ietf-mls-
-              protocol-17>.
+              protocol-20>.
 
    [I-D.murillo-perc-lite]
               Murillo, S. G. and A. Gouaillard, "End to End Media
